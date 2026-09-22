@@ -56,6 +56,8 @@
 #define IDM_THEME_WARM      202
 #define IDM_THEME_DARK      203
 #define IDM_THEME_CALLME    204
+#define IDM_SHOW_DAD        210
+#define IDB_DAD_PHOTO       301
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -812,16 +814,185 @@ static std::wstring BuildReport(const std::wstring& password, const AuditResult&
 }
 
 // ---------------------------------------------------------------------------
+// A small, separate popup window that shows an embedded photo. Deliberately
+// kept isolated from the main window (its own class, its own WndProc) so it
+// can't interact with or affect the carefully-tuned main layout at all.
+// ---------------------------------------------------------------------------
+
+static LRESULT CALLBACK DadPopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    static HBITMAP dadBitmap = NULL;
+
+    switch (msg)
+    {
+    case WM_CREATE:
+        dadBitmap = LoadBitmapW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDB_DAD_PHOTO));
+        return 0;
+
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        HBRUSH bg = CreateSolidBrush(RGB(247, 236, 208));
+        FillRect(dc, &rc, bg);
+        DeleteObject(bg);
+
+        if (dadBitmap)
+        {
+            BITMAP bm;
+            GetObject(dadBitmap, sizeof(bm), &bm);
+
+            HDC memDC = CreateCompatibleDC(dc);
+            HGDIOBJ oldBmp = SelectObject(memDC, dadBitmap);
+            int x = (rc.right - bm.bmWidth) / 2;
+            BitBlt(dc, x, 14, bm.bmWidth, bm.bmHeight, memDC, 0, 0, SRCCOPY);
+            SelectObject(memDC, oldBmp);
+            DeleteDC(memDC);
+
+            RECT captionRc = { 10, 14 + bm.bmHeight + 12, rc.right - 10, rc.bottom - 10 };
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(74, 52, 38));
+            HFONT font = CreateFontW(20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            HGDIOBJ oldFont = SelectObject(dc, font);
+            DrawTextW(dc, L"Dad Mode: Activated", -1, &captionRc, DT_CENTER | DT_WORDBREAK);
+            SelectObject(dc, oldFont);
+            DeleteObject(font);
+        }
+
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    case WM_DESTROY:
+        if (dadBitmap) { DeleteObject(dadBitmap); dadBitmap = NULL; }
+        return 0;
+
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void ShowDadPopup()
+{
+    static bool classRegistered = false;
+    const wchar_t CLASS_NAME[] = L"DadPopupWindowClass";
+
+    if (!classRegistered)
+    {
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = DadPopupProc;
+        wc.hInstance     = GetModuleHandleW(NULL);
+        wc.lpszClassName = CLASS_NAME;
+        wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = NULL; // painted manually in WM_PAINT
+        RegisterClassExW(&wc);
+        classRegistered = true;
+    }
+
+    RECT desired = { 0, 0, 280, 330 };
+    AdjustWindowRect(&desired, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
+
+    HWND popup = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        CLASS_NAME,
+        L"A Small Surprise",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        desired.right - desired.left,
+        desired.bottom - desired.top,
+        gMainWnd, NULL, GetModuleHandleW(NULL), NULL);
+
+    if (popup)
+    {
+        ShowWindow(popup, SW_SHOW);
+        UpdateWindow(popup);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blend a colour toward a background colour, for a soft "washed out" look
+// without needing real alpha-blending (which isn't reliable in plain GDI
+// on every display).
+// ---------------------------------------------------------------------------
+
+static COLORREF BlendColour(COLORREF foreground, COLORREF background, double alpha)
+{
+    int r = static_cast<int>(GetRValue(foreground) * alpha + GetRValue(background) * (1.0 - alpha));
+    int g = static_cast<int>(GetGValue(foreground) * alpha + GetGValue(background) * (1.0 - alpha));
+    int b = static_cast<int>(GetBValue(foreground) * alpha + GetBValue(background) * (1.0 - alpha));
+    return RGB(r, g, b);
+}
+
+struct FlowerSpec
+{
+    bool     leftSide;
+    int      inset;        // distance from the window edge
+    int      y;
+    int      petalRadius;
+    int      petalOffset;
+    COLORREF petalColour;
+    COLORREF centreColour;
+};
+
+static std::vector<FlowerSpec> gFlowerSpecs;
+
+// Randomised once (per app launch), not every repaint - otherwise the
+// pattern would jitter every time the window redraws.
+static void GenerateFlowerSpecs()
+{
+    struct Palette { COLORREF petal; COLORREF centre; };
+    const COLORREF cream = kThemeCallMe.windowBg;
+    const Palette palette[] = {
+        { RGB(94,  156, 190), cream               }, // blue
+        { RGB(232, 150, 178), RGB(237, 140, 44)   }, // pink + orange centre
+        { RGB(130, 157, 108), cream               }, // green
+    };
+    const int paletteCount = 3;
+
+    const int clientHeight = 688; // fixed window size (not resizable)
+    const int minY = 34, maxY = clientHeight - 34;
+    const int flowerCount = 12;
+
+    gFlowerSpecs.clear();
+    for (int i = 0; i < flowerCount; ++i)
+    {
+        FlowerSpec spec;
+        spec.leftSide    = (rand() % 2) == 0;
+        spec.inset       = 6 + rand() % 8;                  // 6-13px from the edge
+        spec.y            = minY + rand() % (maxY - minY);
+        spec.petalRadius = 5 + rand() % 3;                  // 5-7
+        spec.petalOffset = spec.petalRadius - 1;
+
+        const Palette& p = palette[rand() % paletteCount];
+        spec.petalColour  = BlendColour(p.petal,  cream, 0.62); // soft, "a bit transparent"
+        spec.centreColour = BlendColour(p.centre, cream, 0.75);
+
+        gFlowerSpecs.push_back(spec);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Draws a simple 5-petal flower (five overlapping circles plus a centre
 // dot) at the given point - an original vector shape, not an imported image.
+// The pen always matches the fill colour, so no border can show even if
+// NULL_PEN isn't honoured correctly on a particular display.
 // ---------------------------------------------------------------------------
 
 static void DrawFlowerAt(HDC dc, int cx, int cy, int petalRadius, int petalOffset,
                          COLORREF petalColour, COLORREF centreColour)
 {
-    HPEN    nullPen    = static_cast<HPEN>(GetStockObject(NULL_PEN));
+    HPEN    petalPen   = CreatePen(PS_SOLID, 1, petalColour);
     HBRUSH  petalBrush = CreateSolidBrush(petalColour);
-    HGDIOBJ oldPen     = SelectObject(dc, nullPen);
+    HGDIOBJ oldPen     = SelectObject(dc, petalPen);
     HGDIOBJ oldBrush   = SelectObject(dc, petalBrush);
 
     for (int i = 0; i < 5; ++i)
@@ -832,7 +1003,9 @@ static void DrawFlowerAt(HDC dc, int cx, int cy, int petalRadius, int petalOffse
         Ellipse(dc, px - petalRadius, py - petalRadius, px + petalRadius, py + petalRadius);
     }
 
+    HPEN   centrePen   = CreatePen(PS_SOLID, 1, centreColour);
     HBRUSH centreBrush = CreateSolidBrush(centreColour);
+    SelectObject(dc, centrePen);
     SelectObject(dc, centreBrush);
     int holeRadius = petalRadius / 2;
     if (holeRadius < 3) holeRadius = 3;
@@ -841,7 +1014,9 @@ static void DrawFlowerAt(HDC dc, int cx, int cy, int petalRadius, int petalOffse
     SelectObject(dc, oldBrush);
     SelectObject(dc, oldPen);
     DeleteObject(petalBrush);
+    DeleteObject(petalPen);
     DeleteObject(centreBrush);
+    DeleteObject(centrePen);
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,6 +1443,8 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
     {
     case WM_CREATE:
     {
+        GenerateFlowerSpecs();
+
         gUiFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -1431,24 +1608,19 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 
         // Cream Pastel theme only: scatter small flowers down the empty
         // 20px margins on each side, where no control ever sits, so
-        // nothing can overlap or fight for repaint with them.
+        // nothing can overlap or fight for repaint with them. Positions
+        // are randomised once at launch (see GenerateFlowerSpecs).
         if (gActiveThemeId == 3)
         {
-            const COLORREF blue   = RGB(94,  156, 190);
-            const COLORREF pink   = RGB(232, 150, 178);
-            const COLORREF orange = RGB(237, 140, 44);
-            const COLORREF green  = RGB(130, 157, 108);
-            const COLORREF cream  = gTheme.windowBg;
+            RECT clientRc;
+            GetClientRect(hwnd, &clientRc);
 
-            DrawFlowerAt(dc, 11, 55,  5, 4, blue,  cream);
-            DrawFlowerAt(dc, 11, 235, 5, 4, pink,  orange);
-            DrawFlowerAt(dc, 11, 415, 5, 4, green, cream);
-            DrawFlowerAt(dc, 11, 595, 5, 4, blue,  cream);
-
-            DrawFlowerAt(dc, rc.right - 11, 95,  5, 4, green, cream);
-            DrawFlowerAt(dc, rc.right - 11, 275, 5, 4, blue,  cream);
-            DrawFlowerAt(dc, rc.right - 11, 455, 5, 4, pink,  orange);
-            DrawFlowerAt(dc, rc.right - 11, 635, 5, 4, green, cream);
+            for (const FlowerSpec& spec : gFlowerSpecs)
+            {
+                int x = spec.leftSide ? spec.inset : (clientRc.right - spec.inset);
+                DrawFlowerAt(dc, x, spec.y, spec.petalRadius, spec.petalOffset,
+                            spec.petalColour, spec.centreColour);
+            }
         }
 
         return 1;
@@ -1518,6 +1690,10 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 
         case IDM_THEME_CALLME:
             SetActiveTheme(kThemeCallMe, 3);
+            return 0;
+
+        case IDM_SHOW_DAD:
+            ShowDadPopup();
             return 0;
 
         case IDC_CLEAR_BTN:
@@ -1615,6 +1791,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     HMENU menuBar = CreateMenu();
     AppendMenuW(menuBar, MF_POPUP, (UINT_PTR)themeMenu, L"Theme");
+
+    HMENU funMenu = CreatePopupMenu();
+    AppendMenuW(funMenu, MF_STRING, IDM_SHOW_DAD, L"Say Hi to Dad");
+    AppendMenuW(menuBar, MF_POPUP, (UINT_PTR)funMenu, L"Fun");
 
     RECT desired = { 0, 0, 720, 688 };
     AdjustWindowRect(&desired, WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME, TRUE);
