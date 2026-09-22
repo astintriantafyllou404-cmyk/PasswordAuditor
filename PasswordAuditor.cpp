@@ -52,6 +52,9 @@
 #define IDC_METER           108
 #define IDC_SAVE_BTN        109
 #define IDC_BREACH_BTN      110
+#define IDM_THEME_DEFAULT   201
+#define IDM_THEME_WARM      202
+#define IDM_THEME_DARK      203
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -70,6 +73,51 @@ static COLORREF gScoreColour    = RGB(70, 70, 70);
 static int      gMeterScore     = 0;      // 0-100, drives the strength meter fill
 static std::wstring gLastReportText;      // last audit report, for Save Report
 static bool     gHasResult      = false;  // has an audit been run yet?
+
+// ---------------------------------------------------------------------------
+// Themes
+// ---------------------------------------------------------------------------
+struct ThemeColours
+{
+    COLORREF windowBg;
+    COLORREF textColour;
+    COLORREF editBg;
+    COLORREF editText;
+    COLORREF meterEmptyBg;
+    COLORREF meterBorder;
+};
+
+static const ThemeColours kThemeDefault = {
+    RGB(240, 240, 240), // window background
+    RGB(30,  30,  30),  // text
+    RGB(255, 255, 255), // edit box background
+    RGB(20,  20,  20),  // edit box text
+    RGB(228, 228, 228), // meter empty track
+    RGB(160, 160, 160)  // meter border
+};
+
+static const ThemeColours kThemeWarm = {
+    RGB(245, 235, 219), // beige window background
+    RGB(92,  60,  42),  // light-brown text
+    RGB(255, 250, 240), // warm cream edit background
+    RGB(74,  48,  34),  // brown edit text
+    RGB(210, 227, 238), // baby blue meter track
+    RGB(184, 138, 94)   // light-brown meter border
+};
+
+static const ThemeColours kThemeDark = {
+    RGB(32,  34,  38),
+    RGB(228, 230, 235),
+    RGB(24,  26,  30),
+    RGB(218, 220, 226),
+    RGB(50,  53,  60),
+    RGB(95,  100, 112)
+};
+
+static ThemeColours gTheme          = kThemeDefault;
+static HBRUSH       gWindowBgBrush  = NULL;
+static HBRUSH       gEditBgBrush    = NULL;
+static int          gActiveThemeId  = 0; // 0 = Default, 1 = Warm, 2 = Dark
 
 // ---------------------------------------------------------------------------
 // Result of an audit
@@ -752,6 +800,33 @@ static std::wstring BuildReport(const std::wstring& password, const AuditResult&
 }
 
 // ---------------------------------------------------------------------------
+// Apply a theme: rebuild the background brushes and force a full repaint.
+// ---------------------------------------------------------------------------
+
+static void SetActiveTheme(const ThemeColours& theme, int themeId)
+{
+    gTheme = theme;
+    gActiveThemeId = themeId;
+
+    if (gWindowBgBrush) DeleteObject(gWindowBgBrush);
+    if (gEditBgBrush)   DeleteObject(gEditBgBrush);
+    gWindowBgBrush = CreateSolidBrush(gTheme.windowBg);
+    gEditBgBrush   = CreateSolidBrush(gTheme.editBg);
+
+    if (gMainWnd)
+    {
+        HMENU menu = GetMenu(gMainWnd);
+        if (menu)
+        {
+            CheckMenuRadioItem(menu, IDM_THEME_DEFAULT, IDM_THEME_DARK,
+                              IDM_THEME_DEFAULT + themeId, MF_BYCOMMAND);
+        }
+        InvalidateRect(gMainWnd, NULL, TRUE);
+        InvalidateRect(gMeterCtl, NULL, TRUE);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Data breach check (Have I Been Pwned "Pwned Passwords" API)
 //
 // This never sends the password, or even its full hash, anywhere. The
@@ -1273,7 +1348,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         {
             RECT rc = dis->rcItem;
 
-            HBRUSH background = CreateSolidBrush(RGB(228, 228, 228));
+            HBRUSH background = CreateSolidBrush(gTheme.meterEmptyBg);
             FillRect(dis->hDC, &rc, background);
             DeleteObject(background);
 
@@ -1287,9 +1362,27 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 FillRect(dis->hDC, &fillRect, fillBrush);
                 DeleteObject(fillBrush);
             }
+
+            HPEN borderPen = CreatePen(PS_SOLID, 1, gTheme.meterBorder);
+            HGDIOBJ oldPen = SelectObject(dis->hDC, borderPen);
+            HGDIOBJ oldBrush = SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+            Rectangle(dis->hDC, rc.left, rc.top, rc.right, rc.bottom);
+            SelectObject(dis->hDC, oldBrush);
+            SelectObject(dis->hDC, oldPen);
+            DeleteObject(borderPen);
+
             return TRUE;
         }
         break;
+    }
+
+    case WM_ERASEBKGND:
+    {
+        HDC dc = (HDC)wParam;
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect(dc, &rc, gWindowBgBrush);
+        return 1;
     }
 
     case WM_CTLCOLORSTATIC:
@@ -1302,9 +1395,17 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         if (control == gScoreLabel)
             SetTextColor(dc, gScoreColour);
         else
-            SetTextColor(dc, RGB(40, 40, 40));
+            SetTextColor(dc, gTheme.textColour);
 
-        return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+        return (LRESULT)gWindowBgBrush;
+    }
+
+    case WM_CTLCOLOREDIT:
+    {
+        HDC dc = (HDC)wParam;
+        SetTextColor(dc, gTheme.editText);
+        SetBkColor(dc, gTheme.editBg);
+        return (LRESULT)gEditBgBrush;
     }
 
     case WM_COMMAND:
@@ -1332,6 +1433,18 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 
         case IDC_BREACH_BTN:
             RunBreachCheck();
+            return 0;
+
+        case IDM_THEME_DEFAULT:
+            SetActiveTheme(kThemeDefault, 0);
+            return 0;
+
+        case IDM_THEME_WARM:
+            SetActiveTheme(kThemeWarm, 1);
+            return 0;
+
+        case IDM_THEME_DARK:
+            SetActiveTheme(kThemeDark, 2);
             return 0;
 
         case IDC_CLEAR_BTN:
@@ -1415,8 +1528,22 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         return 1;
     }
 
+    // Create theme brushes before any window/control exists, so the very
+    // first paint (which happens during CreateWindowExW itself) already
+    // has a valid background brush to use.
+    SetActiveTheme(kThemeDefault, 0);
+
+    HMENU themeMenu = CreatePopupMenu();
+    AppendMenuW(themeMenu, MF_STRING, IDM_THEME_DEFAULT, L"Default");
+    AppendMenuW(themeMenu, MF_STRING, IDM_THEME_WARM,    L"Warm (Beige / Baby Blue / Brown)");
+    AppendMenuW(themeMenu, MF_STRING, IDM_THEME_DARK,    L"Dark");
+    CheckMenuRadioItem(themeMenu, IDM_THEME_DEFAULT, IDM_THEME_DARK, IDM_THEME_DEFAULT, MF_BYCOMMAND);
+
+    HMENU menuBar = CreateMenu();
+    AppendMenuW(menuBar, MF_POPUP, (UINT_PTR)themeMenu, L"Theme");
+
     RECT desired = { 0, 0, 720, 688 };
-    AdjustWindowRect(&desired, WS_OVERLAPPEDWINDOW, FALSE);
+    AdjustWindowRect(&desired, WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME, TRUE);
 
     gMainWnd = CreateWindowExW(
         0,
@@ -1426,7 +1553,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         CW_USEDEFAULT, CW_USEDEFAULT,
         desired.right - desired.left,
         desired.bottom - desired.top,
-        NULL, NULL, hInstance, NULL);
+        NULL, menuBar, hInstance, NULL);
 
     if (gMainWnd == NULL)
     {
@@ -1434,6 +1561,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                     L"Startup Error", MB_OK | MB_ICONERROR);
         return 1;
     }
+
+    // Now that the window exists, let the theme system sync the menu
+    // checkmark against it too.
+    SetActiveTheme(kThemeDefault, 0);
 
     // Mask the password field by default.
     SendMessageW(gPasswordEdit, EM_SETPASSWORDCHAR, (WPARAM)L'\x25CF', 0);
