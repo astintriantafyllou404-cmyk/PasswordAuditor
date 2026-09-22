@@ -860,16 +860,19 @@ static void RunAudit()
     gLastReportText = BuildReport(password, result);
     gHasResult = true;
 
-    // Stop repainting while we swap the text, reset the view to the top,
-    // then force one clean full repaint. This avoids the "ghosting" glitch
-    // where old characters linger behind new ones after SetWindowTextW.
+    // Stop repainting while we swap the text. Setting it to empty first,
+    // before the real report, forces the control to fully discard its old
+    // internal layout instead of reusing stale line/wrap metrics - this is
+    // what stops old characters "ghosting" behind the new report, which is
+    // a known EDIT control quirk especially over remote/virtual displays.
     SendMessageW(gOutputEdit, WM_SETREDRAW, FALSE, 0);
+    SetWindowTextW(gOutputEdit, L"");
     SetWindowTextW(gOutputEdit, gLastReportText.c_str());
     SendMessageW(gOutputEdit, EM_SETSEL, 0, 0);
     SendMessageW(gOutputEdit, EM_SCROLLCARET, 0, 0);
     SendMessageW(gOutputEdit, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(gOutputEdit, NULL, TRUE);
-    UpdateWindow(gOutputEdit);
+    RedrawWindow(gOutputEdit, NULL, NULL,
+                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_FRAME | RDW_ALLCHILDREN);
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,14 +1069,15 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             gLastReportText.clear();
             gHasResult = false;
             SendMessageW(gOutputEdit, WM_SETREDRAW, FALSE, 0);
+            SetWindowTextW(gOutputEdit, L"");
             SetWindowTextW(gOutputEdit,
                 L"Enter a password above and press Audit Password.\r\n\r\n"
                 L"Nothing you type is saved, logged or sent anywhere. All analysis\r\n"
                 L"happens on this computer.");
             SendMessageW(gOutputEdit, EM_SETSEL, 0, 0);
             SendMessageW(gOutputEdit, WM_SETREDRAW, TRUE, 0);
-            InvalidateRect(gOutputEdit, NULL, TRUE);
-            UpdateWindow(gOutputEdit);
+            RedrawWindow(gOutputEdit, NULL, NULL,
+                        RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_FRAME | RDW_ALLCHILDREN);
             SetFocus(gPasswordEdit);
             return 0;
 
