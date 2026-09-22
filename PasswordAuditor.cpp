@@ -21,6 +21,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
+#include <commdlg.h>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -29,6 +30,10 @@
 #include <cstdlib>
 #include <random>
 #include <algorithm>
+
+#if defined(_MSC_VER)
+#pragma comment(lib, "comdlg32.lib")
+#endif
 
 // ---------------------------------------------------------------------------
 // Control identifiers
@@ -40,6 +45,8 @@
 #define IDC_CLEAR_BTN       105
 #define IDC_OUTPUT_EDIT     106
 #define IDC_SCORE_LABEL     107
+#define IDC_METER           108
+#define IDC_SAVE_BTN        109
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -49,11 +56,15 @@ static HWND     gPasswordEdit   = NULL;
 static HWND     gShowCheck      = NULL;
 static HWND     gOutputEdit     = NULL;
 static HWND     gScoreLabel     = NULL;
+static HWND     gMeterCtl       = NULL;
 static HFONT    gUiFont         = NULL;
 static HFONT    gTitleFont      = NULL;
 static HFONT    gScoreFont      = NULL;
 static HFONT    gMonoFont       = NULL;
 static COLORREF gScoreColour    = RGB(70, 70, 70);
+static int      gMeterScore     = 0;      // 0-100, drives the strength meter fill
+static std::wstring gLastReportText;      // last audit report, for Save Report
+static bool     gHasResult      = false;  // has an audit been run yet?
 
 // ---------------------------------------------------------------------------
 // Result of an audit
@@ -217,10 +228,12 @@ static std::wstring FormatNumber(double value, int decimals)
 // consumer GPUs against a fast hash, 10 billion guesses per second.
 // ---------------------------------------------------------------------------
 
-static std::wstring FormatCrackTime(double entropyBits)
+// entropyBits: effective entropy of the password.
+// guessesPerSecondLog10: log10 of the attacker's guess rate. Different attack
+// scenarios have wildly different rates, which is why the same password can
+// be "instant" for one attacker and "centuries" for another.
+static std::wstring FormatCrackTimeAtRate(double entropyBits, double guessesPerSecondLog10)
 {
-    const double guessesPerSecondLog10 = 10.0;   // 10,000,000,000 per second
-
     // Average case: half the keyspace, hence (bits - 1).
     double log10Seconds = (entropyBits - 1.0) * 0.30103 - guessesPerSecondLog10;
 
@@ -256,6 +269,19 @@ static std::wstring FormatCrackTime(double entropyBits)
         return FormatNumber(pow(10.0, log10Years - 9.0), 1) + L" billion years";
 
     return L"longer than the age of the universe";
+}
+
+// Named attack scenarios, as log10(guesses per second). Real crackers do not
+// all move at the same speed - showing a range is more honest than one number.
+static const double kRateOnlineThrottled = 1.0;   // ~10/sec, a login form with rate limiting
+static const double kRateOfflineSlowHash = 4.0;   // ~10,000/sec, a slow salted hash (bcrypt/Argon2)
+static const double kRateOfflineFastHash = 10.0;  // ~10 billion/sec, a fast unsalted hash on GPUs
+
+// Default: assumes the worst realistic case (fast offline hash), matching
+// the original single-scenario behaviour used elsewhere in this file.
+static std::wstring FormatCrackTime(double entropyBits)
+{
+    return FormatCrackTimeAtRate(entropyBits, kRateOfflineFastHash);
 }
 
 // ---------------------------------------------------------------------------
@@ -673,9 +699,17 @@ static std::wstring BuildReport(const std::wstring& password, const AuditResult&
     report << L"  Character pool    : " << result.poolSize << L" possible characters\r\n";
     report << L"  Raw entropy       : " << FormatNumber(result.rawEntropy, 1) << L" bits\r\n";
     report << L"  Effective entropy : " << FormatNumber(result.effectiveEntropy, 1)
-           << L" bits (after pattern penalties)\r\n";
-    report << L"  Estimated crack   : " << result.crackTime << L"\r\n";
-    report << L"\r\n  Attack model: offline attacker, 10 billion guesses per second.\r\n\r\n";
+           << L" bits (after pattern penalties)\r\n\r\n";
+
+    report << L"CRACK TIME BY ATTACK SCENARIO\r\n" << line;
+    report << L"  Online, rate-limited login   (~10 guesses/sec)       : "
+           << FormatCrackTimeAtRate(result.effectiveEntropy, kRateOnlineThrottled) << L"\r\n";
+    report << L"  Offline, slow salted hash    (~10 thousand/sec)      : "
+           << FormatCrackTimeAtRate(result.effectiveEntropy, kRateOfflineSlowHash) << L"\r\n";
+    report << L"  Offline, fast hash on GPU    (~10 billion/sec)       : "
+           << FormatCrackTimeAtRate(result.effectiveEntropy, kRateOfflineFastHash) << L"\r\n";
+    report << L"\r\n  The same password can be effectively uncrackable on one system and\r\n"
+           << L"  trivial on another - it depends entirely on how the target stores it.\r\n\r\n";
 
     if (!result.strengths.empty())
     {
@@ -710,6 +744,62 @@ static std::wstring BuildReport(const std::wstring& password, const AuditResult&
     report << L"  All analysis happens on this computer.\r\n";
 
     return report.str();
+}
+
+// ---------------------------------------------------------------------------
+// Save the most recent report to a .txt file the user picks
+// ---------------------------------------------------------------------------
+
+static void SaveReportToFile(const std::wstring& reportText)
+{
+    if (reportText.empty())
+    {
+        MessageBoxW(gMainWnd,
+                    L"Run an audit first, then Save Report will save its results.",
+                    L"Nothing to Save",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    wchar_t fileName[MAX_PATH] = L"PasswordAuditReport.txt";
+
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner   = gMainWnd;
+    ofn.lpstrFilter = L"Text File (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile   = fileName;
+    ofn.nMaxFile    = MAX_PATH;
+    ofn.lpstrDefExt = L"txt";
+    ofn.Flags       = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+
+    if (!GetSaveFileNameW(&ofn))
+        return; // user cancelled
+
+    HANDLE file = CreateFileW(fileName, GENERIC_WRITE, 0, NULL,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        MessageBoxW(gMainWnd, L"Could not save the file.", L"Save Failed", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // Write as UTF-8 with a BOM so Notepad and Word display it correctly.
+    int needed = WideCharToMultiByte(CP_UTF8, 0, reportText.c_str(), -1, NULL, 0, NULL, NULL);
+    std::string utf8;
+    if (needed > 0)
+    {
+        utf8.resize(static_cast<size_t>(needed) - 1);
+        WideCharToMultiByte(CP_UTF8, 0, reportText.c_str(), -1, &utf8[0], needed, NULL, NULL);
+    }
+
+    const unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
+    DWORD written = 0;
+    WriteFile(file, bom, sizeof(bom), &written, NULL);
+    WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, NULL);
+    CloseHandle(file);
+
+    MessageBoxW(gMainWnd, L"Report saved.", L"Saved", MB_OK | MB_ICONINFORMATION);
 }
 
 // ---------------------------------------------------------------------------
@@ -764,7 +854,22 @@ static void RunAudit()
     SetWindowTextW(gScoreLabel, scoreText.str().c_str());
     InvalidateRect(gScoreLabel, NULL, TRUE);
 
-    SetWindowTextW(gOutputEdit, BuildReport(password, result).c_str());
+    gMeterScore = result.score;
+    InvalidateRect(gMeterCtl, NULL, TRUE);
+
+    gLastReportText = BuildReport(password, result);
+    gHasResult = true;
+
+    // Stop repainting while we swap the text, reset the view to the top,
+    // then force one clean full repaint. This avoids the "ghosting" glitch
+    // where old characters linger behind new ones after SetWindowTextW.
+    SendMessageW(gOutputEdit, WM_SETREDRAW, FALSE, 0);
+    SetWindowTextW(gOutputEdit, gLastReportText.c_str());
+    SendMessageW(gOutputEdit, EM_SETSEL, 0, 0);
+    SendMessageW(gOutputEdit, EM_SCROLLCARET, 0, 0);
+    SendMessageW(gOutputEdit, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(gOutputEdit, NULL, TRUE);
+    UpdateWindow(gOutputEdit);
 }
 
 // ---------------------------------------------------------------------------
@@ -833,21 +938,28 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         HWND analyseButton = CreateWindowExW(
             0, L"BUTTON", L"Audit Password",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            20, 152, 170, 34,
+            20, 152, 150, 34,
             hwnd, (HMENU)IDC_ANALYSE_BTN, NULL, NULL);
         SendMessageW(analyseButton, WM_SETFONT, (WPARAM)gUiFont, TRUE);
 
         HWND generateButton = CreateWindowExW(
             0, L"BUTTON", L"Suggest a Strong Passphrase",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            200, 152, 250, 34,
+            180, 152, 220, 34,
             hwnd, (HMENU)IDC_GENERATE_BTN, NULL, NULL);
         SendMessageW(generateButton, WM_SETFONT, (WPARAM)gUiFont, TRUE);
+
+        HWND saveButton = CreateWindowExW(
+            0, L"BUTTON", L"Save Report",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            410, 152, 140, 34,
+            hwnd, (HMENU)IDC_SAVE_BTN, NULL, NULL);
+        SendMessageW(saveButton, WM_SETFONT, (WPARAM)gUiFont, TRUE);
 
         HWND clearButton = CreateWindowExW(
             0, L"BUTTON", L"Clear",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            460, 152, 120, 34,
+            560, 152, 100, 34,
             hwnd, (HMENU)IDC_CLEAR_BTN, NULL, NULL);
         SendMessageW(clearButton, WM_SETFONT, (WPARAM)gUiFont, TRUE);
 
@@ -858,6 +970,14 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             hwnd, (HMENU)IDC_SCORE_LABEL, NULL, NULL);
         SendMessageW(gScoreLabel, WM_SETFONT, (WPARAM)gScoreFont, TRUE);
 
+        // Owner-drawn strength meter: a filled bar whose width and colour
+        // reflect the score. Actual drawing happens in WM_DRAWITEM.
+        gMeterCtl = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+            20, 232, 680, 20,
+            hwnd, (HMENU)IDC_METER, NULL, NULL);
+
         gOutputEdit = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"EDIT",
             L"Enter a password above and press Audit Password.\r\n\r\n"
@@ -865,11 +985,37 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             L"happens on this computer.",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP |
             ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-            20, 236, 680, 392,
+            20, 260, 680, 368,
             hwnd, (HMENU)IDC_OUTPUT_EDIT, NULL, NULL);
         SendMessageW(gOutputEdit, WM_SETFONT, (WPARAM)gMonoFont, TRUE);
 
         return 0;
+    }
+
+    case WM_DRAWITEM:
+    {
+        LPDRAWITEMSTRUCT dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+        if (dis->CtlID == IDC_METER)
+        {
+            RECT rc = dis->rcItem;
+
+            HBRUSH background = CreateSolidBrush(RGB(228, 228, 228));
+            FillRect(dis->hDC, &rc, background);
+            DeleteObject(background);
+
+            int fullWidth = rc.right - rc.left;
+            int fillWidth = static_cast<int>(fullWidth * (gMeterScore / 100.0));
+            if (fillWidth > 0)
+            {
+                RECT fillRect = rc;
+                fillRect.right = rc.left + fillWidth;
+                HBRUSH fillBrush = CreateSolidBrush(gScoreColour);
+                FillRect(dis->hDC, &fillRect, fillBrush);
+                DeleteObject(fillBrush);
+            }
+            return TRUE;
+        }
+        break;
     }
 
     case WM_CTLCOLORSTATIC:
@@ -906,15 +1052,28 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             return 0;
         }
 
+        case IDC_SAVE_BTN:
+            SaveReportToFile(gLastReportText);
+            return 0;
+
         case IDC_CLEAR_BTN:
             SetWindowTextW(gPasswordEdit, L"");
             SetWindowTextW(gScoreLabel, L"Score: -- / 100");
             gScoreColour = RGB(70, 70, 70);
             InvalidateRect(gScoreLabel, NULL, TRUE);
+            gMeterScore = 0;
+            InvalidateRect(gMeterCtl, NULL, TRUE);
+            gLastReportText.clear();
+            gHasResult = false;
+            SendMessageW(gOutputEdit, WM_SETREDRAW, FALSE, 0);
             SetWindowTextW(gOutputEdit,
                 L"Enter a password above and press Audit Password.\r\n\r\n"
                 L"Nothing you type is saved, logged or sent anywhere. All analysis\r\n"
                 L"happens on this computer.");
+            SendMessageW(gOutputEdit, EM_SETSEL, 0, 0);
+            SendMessageW(gOutputEdit, WM_SETREDRAW, TRUE, 0);
+            InvalidateRect(gOutputEdit, NULL, TRUE);
+            UpdateWindow(gOutputEdit);
             SetFocus(gPasswordEdit);
             return 0;
 
