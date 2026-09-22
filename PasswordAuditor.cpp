@@ -22,6 +22,8 @@
 
 #include <windows.h>
 #include <commdlg.h>
+#include <wincrypt.h>
+#include <winhttp.h>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -33,6 +35,8 @@
 
 #if defined(_MSC_VER)
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "winhttp.lib")
 #endif
 
 // ---------------------------------------------------------------------------
@@ -47,6 +51,7 @@
 #define IDC_SCORE_LABEL     107
 #define IDC_METER           108
 #define IDC_SAVE_BTN        109
+#define IDC_BREACH_BTN      110
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -747,6 +752,218 @@ static std::wstring BuildReport(const std::wstring& password, const AuditResult&
 }
 
 // ---------------------------------------------------------------------------
+// Data breach check (Have I Been Pwned "Pwned Passwords" API)
+//
+// This never sends the password, or even its full hash, anywhere. The
+// password is hashed locally with SHA-1 (Windows' own CryptoAPI). Only the
+// first 5 hex characters of that hash are sent to the server - a "k-anonymity"
+// lookup. The server sends back every breached hash suffix that starts with
+// those 5 characters, and the match is checked locally. No API key, no
+// account, and the real password never leaves this computer.
+// ---------------------------------------------------------------------------
+
+static bool Sha1HashHex(const std::wstring& input, std::wstring& outHex)
+{
+    outHex.clear();
+
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, NULL, 0, NULL, NULL);
+    if (utf8Len <= 0) return false;
+    std::string utf8(static_cast<size_t>(utf8Len) - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, &utf8[0], utf8Len, NULL, NULL);
+
+    bool ok = false;
+    HCRYPTPROV hProv = 0;
+    HCRYPTHASH hHash = 0;
+
+    if (CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
+    {
+        if (CryptCreateHash(hProv, CALG_SHA1, 0, 0, &hHash))
+        {
+            if (CryptHashData(hHash, reinterpret_cast<const BYTE*>(utf8.data()),
+                              static_cast<DWORD>(utf8.size()), 0))
+            {
+                BYTE digest[20];
+                DWORD digestLen = sizeof(digest);
+                if (CryptGetHashParam(hHash, HP_HASHVAL, digest, &digestLen, 0))
+                {
+                    wchar_t hex[41];
+                    for (int i = 0; i < 20; ++i)
+                        swprintf_s(hex + i * 2, 3, L"%02X", digest[i]);
+                    outHex = hex;
+                    ok = true;
+                }
+            }
+            CryptDestroyHash(hHash);
+        }
+        CryptReleaseContext(hProv, 0);
+    }
+
+    return ok;
+}
+
+// Downloads the list of breached hash suffixes that share the given 5-char
+// prefix. Returns false (with errorMsg set) on any network failure.
+static bool QueryPwnedRange(const std::wstring& prefix5, std::wstring& body, std::wstring& errorMsg)
+{
+    body.clear();
+    errorMsg.clear();
+
+    HINTERNET hSession = WinHttpOpen(L"PasswordAuditor/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession)
+    {
+        errorMsg = L"Could not start a network session.";
+        return false;
+    }
+
+    // Keep this snappy: a school network that blocks the request should
+    // fail fast rather than freezing the app for a long time.
+    WinHttpSetTimeouts(hSession, 6000, 6000, 6000, 6000);
+
+    HINTERNET hConnect = WinHttpConnect(hSession, L"api.pwnedpasswords.com",
+                                        INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect)
+    {
+        errorMsg = L"Could not reach api.pwnedpasswords.com.";
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    std::wstring path = L"/range/" + prefix5;
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path.c_str(), NULL,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hRequest)
+    {
+        errorMsg = L"Could not build the request.";
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    bool ok = false;
+    BOOL sent = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                   WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    BOOL received = sent && WinHttpReceiveResponse(hRequest, NULL);
+
+    if (received)
+    {
+        std::string raw;
+        for (;;)
+        {
+            DWORD available = 0;
+            if (!WinHttpQueryDataAvailable(hRequest, &available) || available == 0) break;
+
+            std::vector<char> buffer(available);
+            DWORD bytesRead = 0;
+            if (!WinHttpReadData(hRequest, buffer.data(), available, &bytesRead)) break;
+            raw.append(buffer.data(), bytesRead);
+        }
+
+        int wideLen = MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), static_cast<int>(raw.size()), NULL, 0);
+        if (wideLen > 0)
+        {
+            body.resize(wideLen);
+            MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), static_cast<int>(raw.size()), &body[0], wideLen);
+        }
+        ok = true;
+    }
+    else
+    {
+        errorMsg = L"No response from the breach-check server. Check the internet "
+                   L"connection, or the network may be blocking this request.";
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return ok;
+}
+
+// The API returns lines of "SUFFIX:COUNT". Look for our suffix among them.
+static bool FindSuffixInResponse(const std::wstring& body, const std::wstring& suffix, long long& count)
+{
+    count = 0;
+    std::wistringstream stream(body);
+    std::wstring line;
+
+    while (std::getline(stream, line))
+    {
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+
+        size_t colon = line.find(L':');
+        if (colon == std::wstring::npos) continue;
+
+        if (_wcsicmp(line.substr(0, colon).c_str(), suffix.c_str()) == 0)
+        {
+            count = _wtoi64(line.substr(colon + 1).c_str());
+            return true;
+        }
+    }
+    return false;
+}
+
+static void RunBreachCheck()
+{
+    wchar_t buffer[129];
+    GetWindowTextW(gPasswordEdit, buffer, 129);
+    std::wstring password(buffer);
+
+    if (password.empty())
+    {
+        MessageBoxW(gMainWnd, L"Enter a password first, then check it for breaches.",
+                    L"Nothing to Check", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    std::wstring fullHash;
+    if (!Sha1HashHex(password, fullHash) || fullHash.size() != 40)
+    {
+        MessageBoxW(gMainWnd, L"Could not hash the password locally.",
+                    L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    std::wstring prefix = fullHash.substr(0, 5);
+    std::wstring suffix = fullHash.substr(5);
+
+    HCURSOR oldCursor = SetCursor(LoadCursorW(NULL, IDC_WAIT));
+
+    std::wstring body, errorMsg;
+    bool success = QueryPwnedRange(prefix, body, errorMsg);
+
+    SetCursor(oldCursor);
+
+    if (!success)
+    {
+        MessageBoxW(gMainWnd, errorMsg.c_str(), L"Could Not Check Online", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    long long breachCount = 0;
+    bool found = FindSuffixInResponse(body, suffix, breachCount);
+
+    if (found)
+    {
+        std::wstringstream msg;
+        msg << L"This exact password has appeared in " << breachCount
+            << L" known data breaches.\r\n\r\n"
+            << L"It is in circulation on hacker password lists and will be tried "
+               L"automatically against your accounts. Change it now, and anywhere "
+               L"else you have reused it.";
+        MessageBoxW(gMainWnd, msg.str().c_str(), L"Found in Breach Data", MB_OK | MB_ICONWARNING);
+    }
+    else
+    {
+        MessageBoxW(gMainWnd,
+                    L"Good news: this exact password was not found in the breach "
+                    L"database checked.\r\n\r\nThis does not guarantee it is strong, "
+                    L"only that it has not previously leaked. Use Audit Password for "
+                    L"a full strength check.",
+                    L"Not Found in Breach Data", MB_OK | MB_ICONINFORMATION);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Save the most recent report to a .txt file the user picks
 // ---------------------------------------------------------------------------
 
@@ -1012,10 +1229,17 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             hwnd, (HMENU)IDC_CLEAR_BTN, NULL, NULL);
         SendMessageW(clearButton, WM_SETFONT, (WPARAM)gUiFont, TRUE);
 
+        HWND breachButton = CreateWindowExW(
+            0, L"BUTTON", L"Check for Data Breaches (online, no password sent)",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            20, 192, 680, 34,
+            hwnd, (HMENU)IDC_BREACH_BTN, NULL, NULL);
+        SendMessageW(breachButton, WM_SETFONT, (WPARAM)gUiFont, TRUE);
+
         gScoreLabel = CreateWindowExW(
             0, L"STATIC", L"Score: -- / 100",
             WS_CHILD | WS_VISIBLE,
-            20, 200, 680, 28,
+            20, 240, 680, 28,
             hwnd, (HMENU)IDC_SCORE_LABEL, NULL, NULL);
         SendMessageW(gScoreLabel, WM_SETFONT, (WPARAM)gScoreFont, TRUE);
 
@@ -1024,7 +1248,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         gMeterCtl = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-            20, 232, 680, 20,
+            20, 272, 680, 20,
             hwnd, (HMENU)IDC_METER, NULL, NULL);
 
         gOutputEdit = CreateWindowExW(
@@ -1034,7 +1258,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             L"happens on this computer.",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP |
             ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-            20, 260, 680, 368,
+            20, 300, 680, 368,
             hwnd, (HMENU)IDC_OUTPUT_EDIT, NULL, NULL);
         SendMessageW(gOutputEdit, WM_SETFONT, (WPARAM)gMonoFont, TRUE);
         SubclassOutputEdit(gOutputEdit);
@@ -1104,6 +1328,10 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 
         case IDC_SAVE_BTN:
             SaveReportToFile(gLastReportText);
+            return 0;
+
+        case IDC_BREACH_BTN:
+            RunBreachCheck();
             return 0;
 
         case IDC_CLEAR_BTN:
@@ -1187,7 +1415,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         return 1;
     }
 
-    RECT desired = { 0, 0, 720, 648 };
+    RECT desired = { 0, 0, 720, 688 };
     AdjustWindowRect(&desired, WS_OVERLAPPEDWINDOW, FALSE);
 
     gMainWnd = CreateWindowExW(
