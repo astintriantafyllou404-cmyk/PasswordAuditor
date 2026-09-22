@@ -803,6 +803,64 @@ static void SaveReportToFile(const std::wstring& reportText)
 }
 
 // ---------------------------------------------------------------------------
+// The built-in scrollbar normally shifts the visible pixels and only
+// redraws the newly revealed strip. On some remote/virtual displays that
+// partial redraw doesn't clear properly, leaving old text visible behind
+// the new scroll position. Subclassing the control lets us force a full,
+// non-optimized repaint after anything that could have scrolled it.
+// ---------------------------------------------------------------------------
+
+static WNDPROC gOldEditProc = NULL;
+
+static LRESULT CALLBACK OutputEditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    LRESULT result = CallWindowProcW(gOldEditProc, hwnd, msg, wParam, lParam);
+
+    if (msg == WM_VSCROLL || msg == WM_HSCROLL || msg == WM_MOUSEWHEEL ||
+        msg == WM_KEYDOWN  || msg == WM_SETTEXT)
+    {
+        InvalidateRect(hwnd, NULL, TRUE);
+        UpdateWindow(hwnd);
+    }
+
+    return result;
+}
+
+static void SubclassOutputEdit(HWND edit)
+{
+    gOldEditProc = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrW(edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(OutputEditSubclassProc)));
+}
+
+// ---------------------------------------------------------------------------
+// Replace the report text by destroying and recreating the output control.
+// A brand-new window has never been painted, so there is no old content for
+// it to ghost behind the new text - this removes the redraw bug entirely
+// rather than working around it.
+// ---------------------------------------------------------------------------
+
+static void SetOutputText(const std::wstring& text)
+{
+    RECT rc;
+    GetWindowRect(gOutputEdit, &rc);
+    POINT topLeft = { rc.left, rc.top };
+    ScreenToClient(gMainWnd, &topLeft);
+    int width  = rc.right  - rc.left;
+    int height = rc.bottom - rc.top;
+
+    DestroyWindow(gOutputEdit);
+
+    gOutputEdit = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"EDIT", text.c_str(),
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP |
+        ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+        topLeft.x, topLeft.y, width, height,
+        gMainWnd, (HMENU)IDC_OUTPUT_EDIT, NULL, NULL);
+    SendMessageW(gOutputEdit, WM_SETFONT, (WPARAM)gMonoFont, TRUE);
+    SubclassOutputEdit(gOutputEdit);
+}
+
+// ---------------------------------------------------------------------------
 // Run an audit against whatever is in the password box
 // ---------------------------------------------------------------------------
 
@@ -860,19 +918,7 @@ static void RunAudit()
     gLastReportText = BuildReport(password, result);
     gHasResult = true;
 
-    // Stop repainting while we swap the text. Setting it to empty first,
-    // before the real report, forces the control to fully discard its old
-    // internal layout instead of reusing stale line/wrap metrics - this is
-    // what stops old characters "ghosting" behind the new report, which is
-    // a known EDIT control quirk especially over remote/virtual displays.
-    SendMessageW(gOutputEdit, WM_SETREDRAW, FALSE, 0);
-    SetWindowTextW(gOutputEdit, L"");
-    SetWindowTextW(gOutputEdit, gLastReportText.c_str());
-    SendMessageW(gOutputEdit, EM_SETSEL, 0, 0);
-    SendMessageW(gOutputEdit, EM_SCROLLCARET, 0, 0);
-    SendMessageW(gOutputEdit, WM_SETREDRAW, TRUE, 0);
-    RedrawWindow(gOutputEdit, NULL, NULL,
-                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_FRAME | RDW_ALLCHILDREN);
+    SetOutputText(gLastReportText);
 }
 
 // ---------------------------------------------------------------------------
@@ -991,6 +1037,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             20, 260, 680, 368,
             hwnd, (HMENU)IDC_OUTPUT_EDIT, NULL, NULL);
         SendMessageW(gOutputEdit, WM_SETFONT, (WPARAM)gMonoFont, TRUE);
+        SubclassOutputEdit(gOutputEdit);
 
         return 0;
     }
@@ -1068,16 +1115,10 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             InvalidateRect(gMeterCtl, NULL, TRUE);
             gLastReportText.clear();
             gHasResult = false;
-            SendMessageW(gOutputEdit, WM_SETREDRAW, FALSE, 0);
-            SetWindowTextW(gOutputEdit, L"");
-            SetWindowTextW(gOutputEdit,
+            SetOutputText(
                 L"Enter a password above and press Audit Password.\r\n\r\n"
                 L"Nothing you type is saved, logged or sent anywhere. All analysis\r\n"
                 L"happens on this computer.");
-            SendMessageW(gOutputEdit, EM_SETSEL, 0, 0);
-            SendMessageW(gOutputEdit, WM_SETREDRAW, TRUE, 0);
-            RedrawWindow(gOutputEdit, NULL, NULL,
-                        RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_FRAME | RDW_ALLCHILDREN);
             SetFocus(gPasswordEdit);
             return 0;
 
