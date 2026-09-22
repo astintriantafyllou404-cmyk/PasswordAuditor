@@ -55,6 +55,7 @@
 #define IDM_THEME_DEFAULT   201
 #define IDM_THEME_WARM      202
 #define IDM_THEME_DARK      203
+#define IDM_THEME_CALLME    204
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -112,6 +113,17 @@ static const ThemeColours kThemeDark = {
     RGB(218, 220, 226),
     RGB(50,  53,  60),
     RGB(95,  100, 112)
+};
+
+// Warm cream background with pink/teal/mint/mustard accents - an original
+// palette inspired by a retro pastel aesthetic, not any copyrighted artwork.
+static const ThemeColours kThemeCallMe = {
+    RGB(247, 236, 208), // cream window background
+    RGB(74,  52,  38),  // dark brown text
+    RGB(255, 250, 235), // warm off-white edit background
+    RGB(60,  42,  30),  // dark brown edit text
+    RGB(178, 224, 214), // mint-teal meter track
+    RGB(212, 163, 55)   // mustard meter border
 };
 
 static ThemeColours gTheme          = kThemeDefault;
@@ -800,6 +812,39 @@ static std::wstring BuildReport(const std::wstring& password, const AuditResult&
 }
 
 // ---------------------------------------------------------------------------
+// Draws a simple 5-petal flower (five overlapping circles plus a centre
+// dot) at the given point - an original vector shape, not an imported image.
+// ---------------------------------------------------------------------------
+
+static void DrawFlowerAt(HDC dc, int cx, int cy, int petalRadius, int petalOffset,
+                         COLORREF petalColour, COLORREF centreColour)
+{
+    HPEN    nullPen    = static_cast<HPEN>(GetStockObject(NULL_PEN));
+    HBRUSH  petalBrush = CreateSolidBrush(petalColour);
+    HGDIOBJ oldPen     = SelectObject(dc, nullPen);
+    HGDIOBJ oldBrush   = SelectObject(dc, petalBrush);
+
+    for (int i = 0; i < 5; ++i)
+    {
+        double angle = (-90.0 + i * 72.0) * 3.14159265358979 / 180.0;
+        int px = cx + static_cast<int>(petalOffset * std::cos(angle));
+        int py = cy + static_cast<int>(petalOffset * std::sin(angle));
+        Ellipse(dc, px - petalRadius, py - petalRadius, px + petalRadius, py + petalRadius);
+    }
+
+    HBRUSH centreBrush = CreateSolidBrush(centreColour);
+    SelectObject(dc, centreBrush);
+    int holeRadius = petalRadius / 2;
+    if (holeRadius < 3) holeRadius = 3;
+    Ellipse(dc, cx - holeRadius, cy - holeRadius, cx + holeRadius, cy + holeRadius);
+
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(petalBrush);
+    DeleteObject(centreBrush);
+}
+
+// ---------------------------------------------------------------------------
 // Apply a theme: rebuild the background brushes and force a full repaint.
 // ---------------------------------------------------------------------------
 
@@ -818,7 +863,7 @@ static void SetActiveTheme(const ThemeColours& theme, int themeId)
         HMENU menu = GetMenu(gMainWnd);
         if (menu)
         {
-            CheckMenuRadioItem(menu, IDM_THEME_DEFAULT, IDM_THEME_DARK,
+            CheckMenuRadioItem(menu, IDM_THEME_DEFAULT, IDM_THEME_CALLME,
                               IDM_THEME_DEFAULT + themeId, MF_BYCOMMAND);
         }
         InvalidateRect(gMainWnd, NULL, TRUE);
@@ -1254,6 +1299,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             hwnd, NULL, NULL, NULL);
         SendMessageW(subtitle, WM_SETFONT, (WPARAM)gUiFont, TRUE);
 
+
         HWND promptLabel = CreateWindowExW(
             0, L"STATIC", L"Password to audit:",
             WS_CHILD | WS_VISIBLE,
@@ -1382,6 +1428,29 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         RECT rc;
         GetClientRect(hwnd, &rc);
         FillRect(dc, &rc, gWindowBgBrush);
+
+        // Cream Pastel theme only: scatter small flowers down the empty
+        // 20px margins on each side, where no control ever sits, so
+        // nothing can overlap or fight for repaint with them.
+        if (gActiveThemeId == 3)
+        {
+            const COLORREF blue   = RGB(94,  156, 190);
+            const COLORREF pink   = RGB(232, 150, 178);
+            const COLORREF orange = RGB(237, 140, 44);
+            const COLORREF green  = RGB(130, 157, 108);
+            const COLORREF cream  = gTheme.windowBg;
+
+            DrawFlowerAt(dc, 11, 55,  5, 4, blue,  cream);
+            DrawFlowerAt(dc, 11, 235, 5, 4, pink,  orange);
+            DrawFlowerAt(dc, 11, 415, 5, 4, green, cream);
+            DrawFlowerAt(dc, 11, 595, 5, 4, blue,  cream);
+
+            DrawFlowerAt(dc, rc.right - 11, 95,  5, 4, green, cream);
+            DrawFlowerAt(dc, rc.right - 11, 275, 5, 4, blue,  cream);
+            DrawFlowerAt(dc, rc.right - 11, 455, 5, 4, pink,  orange);
+            DrawFlowerAt(dc, rc.right - 11, 635, 5, 4, green, cream);
+        }
+
         return 1;
     }
 
@@ -1445,6 +1514,10 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 
         case IDM_THEME_DARK:
             SetActiveTheme(kThemeDark, 2);
+            return 0;
+
+        case IDM_THEME_CALLME:
+            SetActiveTheme(kThemeCallMe, 3);
             return 0;
 
         case IDC_CLEAR_BTN:
@@ -1537,7 +1610,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     AppendMenuW(themeMenu, MF_STRING, IDM_THEME_DEFAULT, L"Default");
     AppendMenuW(themeMenu, MF_STRING, IDM_THEME_WARM,    L"Warm (Beige / Baby Blue / Brown)");
     AppendMenuW(themeMenu, MF_STRING, IDM_THEME_DARK,    L"Dark");
-    CheckMenuRadioItem(themeMenu, IDM_THEME_DEFAULT, IDM_THEME_DARK, IDM_THEME_DEFAULT, MF_BYCOMMAND);
+    AppendMenuW(themeMenu, MF_STRING, IDM_THEME_CALLME,  L"Cream Pastel (Pink / Teal / Mustard)");
+    CheckMenuRadioItem(themeMenu, IDM_THEME_DEFAULT, IDM_THEME_CALLME, IDM_THEME_DEFAULT, MF_BYCOMMAND);
 
     HMENU menuBar = CreateMenu();
     AppendMenuW(menuBar, MF_POPUP, (UINT_PTR)themeMenu, L"Theme");
