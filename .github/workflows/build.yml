@@ -1,0 +1,28 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Compile resource file (icon)
+        run: rc app.rc
+        shell: cmd
+
+      - name: Compile and link
+        run: cl /EHsc /D UNICODE /D _UNICODE PasswordAuditor.cpp app.res /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib
+        shell: cmd
+
+      - name: Upload the built exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: PasswordAuditor
+          path: PasswordAuditor.exe
