@@ -2152,7 +2152,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     AppendMenuW(menuBar, MF_POPUP, (UINT_PTR)themeMenu, L"Theme");
 
     HMENU funMenu = CreatePopupMenu();
-    AppendMenuW(funMenu, MF_STRING, IDM_SHOW_DAD, L"Say Hi to Dad");
+    AppendMenuW(funMenu, MF_STRING, IDM_SHOW_DAD, L"Say Hi to Kalindu");
     AppendMenuW(menuBar, MF_POPUP, (UINT_PTR)funMenu, L"Kalindu");
 
     HMENU toolsMenu = CreatePopupMenu();
