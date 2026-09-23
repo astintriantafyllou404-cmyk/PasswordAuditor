@@ -876,7 +876,7 @@ static LRESULT CALLBACK DadPopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
             HGDIOBJ oldFont = SelectObject(dc, font);
-            DrawTextW(dc, L"Dad Mode: Activated", -1, &captionRc, DT_CENTER | DT_WORDBREAK);
+            DrawTextW(dc, L"Kalindu Mode: Activated", -1, &captionRc, DT_CENTER | DT_WORDBREAK);
             SelectObject(dc, oldFont);
             DeleteObject(font);
         }
