@@ -1,3 +1,5 @@
-// Resource script: embeds the application icon into the .exe
-// Add this file to the Visual Studio project alongside app_icon.ico.
+// Resource script: embeds the application icon and the "Dad Mode" photo.
+// Add both this file and its referenced files to the Visual Studio /
+// build project.
 1 ICON "app_icon.ico"
+301 BITMAP "dad_photo.bmp"
