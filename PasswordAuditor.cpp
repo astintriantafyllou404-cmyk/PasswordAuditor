@@ -32,6 +32,7 @@
 #include <cstdlib>
 #include <random>
 #include <algorithm>
+#include <iterator>
 
 #if defined(_MSC_VER)
 #pragma comment(lib, "comdlg32.lib")
@@ -58,6 +59,22 @@
 #define IDM_THEME_CALLME    204
 #define IDM_SHOW_DAD        210
 #define IDB_DAD_PHOTO       301
+#define IDM_SHOW_COMPARE    211
+#define IDM_SHOW_REUSE      212
+
+#define IDC_CMP_EDIT_A          401
+#define IDC_CMP_EDIT_B          402
+#define IDC_CMP_BUTTON          403
+#define IDC_CMP_OUTPUT          404
+
+#define IDC_REUSE_CHECK_GMAIL   421
+#define IDC_REUSE_CHECK_STEAM   422
+#define IDC_REUSE_CHECK_DISCORD 423
+#define IDC_REUSE_CHECK_SCHOOL  424
+#define IDC_REUSE_CHECK_BANKING 425
+#define IDC_REUSE_CHECK_SOCIAL  426
+#define IDC_REUSE_BUTTON        427
+#define IDC_REUSE_OUTPUT        428
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -919,6 +936,315 @@ static void ShowDadPopup()
 }
 
 // ---------------------------------------------------------------------------
+// Password Comparison Mode - reuses AuditPassword, the same scoring engine
+// behind Audit Password, so both tools always agree with each other.
+// ---------------------------------------------------------------------------
+
+static HWND gCmpEditA  = NULL;
+static HWND gCmpEditB  = NULL;
+static HWND gCmpOutput = NULL;
+
+static void RunComparison(HWND popupHwnd)
+{
+    wchar_t bufA[129] = L"";
+    wchar_t bufB[129] = L"";
+    GetWindowTextW(gCmpEditA, bufA, 129);
+    GetWindowTextW(gCmpEditB, bufB, 129);
+    std::wstring pwA(bufA), pwB(bufB);
+
+    if (pwA.empty() || pwB.empty())
+    {
+        MessageBoxW(popupHwnd, L"Enter both passwords to compare.",
+                    L"Nothing to Compare", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    AuditResult resultA = AuditPassword(pwA);
+    AuditResult resultB = AuditPassword(pwB);
+
+    std::wstring winner;
+    if      (resultA.score > resultB.score) winner = L"Password A";
+    else if (resultB.score > resultA.score) winner = L"Password B";
+    else                                     winner = L"Tie";
+
+    std::wstringstream out;
+    out << L"Winner: " << winner << L"\r\n";
+    out << L"--------------------------------------------\r\n\r\n";
+    out << L"Password A\r\n";
+    out << L"  Score: " << resultA.score << L"/100 (" << resultA.rating << L")\r\n";
+    out << L"  Crack Time: " << resultA.crackTime << L"\r\n\r\n";
+    out << L"Password B\r\n";
+    out << L"  Score: " << resultB.score << L"/100 (" << resultB.rating << L")\r\n";
+    out << L"  Crack Time: " << resultB.crackTime << L"\r\n";
+
+    SetWindowTextW(gCmpOutput, out.str().c_str());
+}
+
+static LRESULT CALLBACK ComparePopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
+    case WM_CREATE:
+    {
+        HFONT font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        HFONT boldFont = CreateFontW(-15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        HFONT monoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+
+        HWND note = CreateWindowExW(0, L"STATIC",
+            L"Neither password is saved, logged or sent anywhere.",
+            WS_CHILD | WS_VISIBLE, 16, 12, 420, 18, hwnd, NULL, NULL, NULL);
+        SendMessageW(note, WM_SETFONT, (WPARAM)font, TRUE);
+
+        HWND labelA = CreateWindowExW(0, L"STATIC", L"Password A:",
+            WS_CHILD | WS_VISIBLE, 16, 40, 200, 18, hwnd, NULL, NULL, NULL);
+        SendMessageW(labelA, WM_SETFONT, (WPARAM)font, TRUE);
+
+        gCmpEditA = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            16, 60, 420, 26, hwnd, (HMENU)IDC_CMP_EDIT_A, NULL, NULL);
+        SendMessageW(gCmpEditA, WM_SETFONT, (WPARAM)font, TRUE);
+
+        HWND labelB = CreateWindowExW(0, L"STATIC", L"Password B:",
+            WS_CHILD | WS_VISIBLE, 16, 98, 200, 18, hwnd, NULL, NULL, NULL);
+        SendMessageW(labelB, WM_SETFONT, (WPARAM)font, TRUE);
+
+        gCmpEditB = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            16, 118, 420, 26, hwnd, (HMENU)IDC_CMP_EDIT_B, NULL, NULL);
+        SendMessageW(gCmpEditB, WM_SETFONT, (WPARAM)font, TRUE);
+
+        HWND button = CreateWindowExW(0, L"BUTTON", L"Compare Passwords",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            16, 156, 200, 32, hwnd, (HMENU)IDC_CMP_BUTTON, NULL, NULL);
+        SendMessageW(button, WM_SETFONT, (WPARAM)boldFont, TRUE);
+
+        gCmpOutput = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
+            L"Enter two passwords above and press Compare Passwords.",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            16, 198, 420, 170, hwnd, (HMENU)IDC_CMP_OUTPUT, NULL, NULL);
+        SendMessageW(gCmpOutput, WM_SETFONT, (WPARAM)monoFont, TRUE);
+
+        return 0;
+    }
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_CMP_BUTTON)
+        {
+            RunComparison(hwnd);
+            return 0;
+        }
+        break;
+
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void ShowComparePopup()
+{
+    static bool classRegistered = false;
+    const wchar_t CLASS_NAME[] = L"ComparePopupWindowClass";
+
+    if (!classRegistered)
+    {
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = ComparePopupProc;
+        wc.hInstance     = GetModuleHandleW(NULL);
+        wc.lpszClassName = CLASS_NAME;
+        wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        RegisterClassExW(&wc);
+        classRegistered = true;
+    }
+
+    RECT desired = { 0, 0, 460, 410 };
+    AdjustWindowRect(&desired, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
+
+    HWND popup = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        CLASS_NAME,
+        L"Compare Passwords",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        desired.right - desired.left,
+        desired.bottom - desired.top,
+        gMainWnd, NULL, GetModuleHandleW(NULL), NULL);
+
+    if (popup)
+    {
+        ShowWindow(popup, SW_SHOW);
+        UpdateWindow(popup);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Password Reuse Risk Calculator
+// ---------------------------------------------------------------------------
+
+struct ReuseServiceCheckbox { int id; const wchar_t* label; };
+
+static const ReuseServiceCheckbox kReuseServices[] = {
+    { IDC_REUSE_CHECK_GMAIL,   L"Gmail / Email"           },
+    { IDC_REUSE_CHECK_STEAM,   L"Steam / Gaming"          },
+    { IDC_REUSE_CHECK_DISCORD, L"Discord"                 },
+    { IDC_REUSE_CHECK_SCHOOL,  L"School / Student Portal" },
+    { IDC_REUSE_CHECK_BANKING, L"Banking"                 },
+    { IDC_REUSE_CHECK_SOCIAL,  L"Social Media"             },
+};
+static const int kReuseServiceCount = sizeof(kReuseServices) / sizeof(kReuseServices[0]);
+
+static HWND gReuseOutput = NULL;
+
+static void RunReuseCalculation(HWND popupHwnd)
+{
+    std::vector<std::wstring> checked;
+    for (int i = 0; i < kReuseServiceCount; ++i)
+    {
+        HWND box = GetDlgItem(popupHwnd, kReuseServices[i].id);
+        if (box && SendMessageW(box, BM_GETCHECK, 0, 0) == BST_CHECKED)
+            checked.push_back(kReuseServices[i].label);
+    }
+
+    if (checked.empty())
+    {
+        MessageBoxW(popupHwnd, L"Tick at least one service this password is used on.",
+                    L"Nothing Selected", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    int count = static_cast<int>(checked.size());
+    std::wstring risk;
+    if      (count <= 1) risk = L"LOW";
+    else if (count <= 3) risk = L"MEDIUM";
+    else if (count <= 5) risk = L"HIGH";
+    else                  risk = L"CRITICAL";
+
+    std::wstringstream out;
+    out << L"Risk Level: " << risk << L"\r\n";
+    out << L"--------------------------------------------\r\n\r\n";
+    out << L"A breach of just one of these services could expose " << count
+        << (count == 1 ? L" account" : L" separate accounts")
+        << L", since the same password would let an attacker straight into "
+           L"the others too.\r\n\r\nServices this password is reused on:\r\n";
+    for (const auto& s : checked)
+        out << L"  - " << s << L"\r\n";
+    out << L"\r\nUse a different password for each service, or a password "
+           L"manager, so one leak stays contained to a single account.";
+
+    SetWindowTextW(gReuseOutput, out.str().c_str());
+}
+
+static LRESULT CALLBACK ReusePopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
+    case WM_CREATE:
+    {
+        HFONT font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        HFONT boldFont = CreateFontW(-15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        HFONT monoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+
+        HWND note = CreateWindowExW(0, L"STATIC",
+            L"Tick every place you use this exact password:",
+            WS_CHILD | WS_VISIBLE, 16, 12, 320, 18, hwnd, NULL, NULL, NULL);
+        SendMessageW(note, WM_SETFONT, (WPARAM)font, TRUE);
+
+        int y = 38;
+        for (int i = 0; i < kReuseServiceCount; ++i)
+        {
+            HWND box = CreateWindowExW(0, L"BUTTON", kReuseServices[i].label,
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                16, y, 300, 22, hwnd, (HMENU)kReuseServices[i].id, NULL, NULL);
+            SendMessageW(box, WM_SETFONT, (WPARAM)font, TRUE);
+            y += 26;
+        }
+
+        HWND button = CreateWindowExW(0, L"BUTTON", L"Calculate Risk",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            16, y + 8, 180, 32, hwnd, (HMENU)IDC_REUSE_BUTTON, NULL, NULL);
+        SendMessageW(button, WM_SETFONT, (WPARAM)boldFont, TRUE);
+
+        gReuseOutput = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
+            L"Tick the services above and press Calculate Risk.",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            16, y + 48, 320, 160, hwnd, (HMENU)IDC_REUSE_OUTPUT, NULL, NULL);
+        SendMessageW(gReuseOutput, WM_SETFONT, (WPARAM)monoFont, TRUE);
+
+        return 0;
+    }
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_REUSE_BUTTON)
+        {
+            RunReuseCalculation(hwnd);
+            return 0;
+        }
+        break;
+
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void ShowReusePopup()
+{
+    static bool classRegistered = false;
+    const wchar_t CLASS_NAME[] = L"ReusePopupWindowClass";
+
+    if (!classRegistered)
+    {
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = ReusePopupProc;
+        wc.hInstance     = GetModuleHandleW(NULL);
+        wc.lpszClassName = CLASS_NAME;
+        wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        RegisterClassExW(&wc);
+        classRegistered = true;
+    }
+
+    int contentBottom = 38 + kReuseServiceCount * 26 + 48 + 160 + 20;
+    RECT desired = { 0, 0, 360, contentBottom };
+    AdjustWindowRect(&desired, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
+
+    HWND popup = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        CLASS_NAME,
+        L"Password Reuse Risk",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        desired.right - desired.left,
+        desired.bottom - desired.top,
+        gMainWnd, NULL, GetModuleHandleW(NULL), NULL);
+
+    if (popup)
+    {
+        ShowWindow(popup, SW_SHOW);
+        UpdateWindow(popup);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Blend a colour toward a background colour, for a soft "washed out" look
 // without needing real alpha-blending (which isn't reliable in plain GDI
 // on every display).
@@ -1197,6 +1523,21 @@ static bool FindSuffixInResponse(const std::wstring& body, const std::wstring& s
     return false;
 }
 
+// Adds thousands separators (1653201 -> "1,653,201") for readability.
+static std::wstring FormatCount(long long value)
+{
+    std::wstring digits = std::to_wstring(value);
+    std::wstring result;
+    int sinceComma = 0;
+    for (auto it = digits.rbegin(); it != digits.rend(); ++it)
+    {
+        result.insert(result.begin(), *it);
+        if (++sinceComma % 3 == 0 && std::next(it) != digits.rend())
+            result.insert(result.begin(), L',');
+    }
+    return result;
+}
+
 static void RunBreachCheck()
 {
     wchar_t buffer[129];
@@ -1239,13 +1580,23 @@ static void RunBreachCheck()
 
     if (found)
     {
+        // A corrected 4-tier scale (the original 3-tier idea left a gap
+        // between 10,000 and 100,000 undefined).
+        std::wstring severity;
+        UINT          icon;
+        if      (breachCount < 100)     { severity = L"LOW";      icon = MB_ICONINFORMATION; }
+        else if (breachCount < 10000)   { severity = L"MEDIUM";   icon = MB_ICONWARNING;     }
+        else if (breachCount < 100000)  { severity = L"HIGH";     icon = MB_ICONWARNING;     }
+        else                             { severity = L"CRITICAL"; icon = MB_ICONERROR;       }
+
         std::wstringstream msg;
-        msg << L"This exact password has appeared in " << breachCount
-            << L" known data breaches.\r\n\r\n"
+        msg << L"Severity: " << severity << L"\r\n\r\n"
+            << L"This exact password has appeared " << FormatCount(breachCount)
+            << (breachCount == 1 ? L" time" : L" times") << L" in known data breaches.\r\n\r\n"
             << L"It is in circulation on hacker password lists and will be tried "
                L"automatically against your accounts. Change it now, and anywhere "
                L"else you have reused it.";
-        MessageBoxW(gMainWnd, msg.str().c_str(), L"Found in Breach Data", MB_OK | MB_ICONWARNING);
+        MessageBoxW(gMainWnd, msg.str().c_str(), L"Found in Breach Data", MB_OK | icon);
     }
     else
     {
@@ -1696,6 +2047,14 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             ShowDadPopup();
             return 0;
 
+        case IDM_SHOW_COMPARE:
+            ShowComparePopup();
+            return 0;
+
+        case IDM_SHOW_REUSE:
+            ShowReusePopup();
+            return 0;
+
         case IDC_CLEAR_BTN:
             SetWindowTextW(gPasswordEdit, L"");
             SetWindowTextW(gScoreLabel, L"Score: -- / 100");
@@ -1794,7 +2153,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     HMENU funMenu = CreatePopupMenu();
     AppendMenuW(funMenu, MF_STRING, IDM_SHOW_DAD, L"Say Hi to Dad");
-    AppendMenuW(menuBar, MF_POPUP, (UINT_PTR)funMenu, L"Fun");
+    AppendMenuW(menuBar, MF_POPUP, (UINT_PTR)funMenu, L"Kalindu");
+
+    HMENU toolsMenu = CreatePopupMenu();
+    AppendMenuW(toolsMenu, MF_STRING, IDM_SHOW_COMPARE, L"Compare Passwords");
+    AppendMenuW(toolsMenu, MF_STRING, IDM_SHOW_REUSE,   L"Password Reuse Risk");
+    AppendMenuW(menuBar, MF_POPUP, (UINT_PTR)toolsMenu, L"Tools");
 
     RECT desired = { 0, 0, 720, 688 };
     AdjustWindowRect(&desired, WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME, TRUE);
